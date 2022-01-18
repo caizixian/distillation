@@ -1,7 +1,10 @@
-# Prerequisite
+# An Empirical Lower Bound on the Overheads of Production Garbage Collectors
+Artifact to reproduce the results in the paper.
+
+## Prerequisite
 - [libpfm4](https://sourceforge.net/projects/perfmon2/files/libpfm4/)
 
-# Build
+## Build
 Please adjust the definition of `JDK`, `DACAPO2006JAR`, and `DACAPOBACHJAR` in `Makefile` to point to the appropriate paths on your system.
 
 To build, simple run `make`.
@@ -40,7 +43,7 @@ pauses  time    time.other      time.stw        PERF_COUNT_SW_TASK_CLOCK.other  
 ===== DaCapo 9.12 fop PASSED in 221 msec =====
 ```
 
-# Usage
+## Usage
 For DaCapo 2006, use the following.
 ```console
 PERF_EVENTS=<events> LD_PRELOAD=`pwd`/libperf_statistics.so java -Djava.library.path=`pwd` -agentpath:`pwd`/libperf_statistics.so -cp `pwd`:dacapo-2006-10-MR2.jar <jvm_args> Harness -c Dacapo2006Callback -n <iterations> <benchmark>
@@ -50,3 +53,12 @@ For DaCapo 9.12, use the following.
 ```console
 PERF_EVENTS=<events> LD_PRELOAD=`pwd`/libperf_statistics.so java -Djava.library.path=`pwd` -agentpath:`pwd`/libperf_statistics.so -cp `pwd`:dacapo-9.12-bach.jar <jvm_args> Harness -c DacapoBachCallback -n <iterations> <benchmark>
 ```
+
+`<events>` is a comma-separated list of performance counters to be measured.
+Please refer to the `libpfm4` documentation for more details.
+For example, to measure the cycle count and the instruction count, you can use `PERF_COUNT_HW_CPU_CYCLES,PERF_COUNT_HW_INSTRUCTIONS`.
+
+## License
+Copyright 2021 Zixian Cai
+
+Licensed under the Apache License, Version 2.0. A copy of the license is provided [here](./LICENSE).
