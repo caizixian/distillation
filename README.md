@@ -2,7 +2,7 @@
 Artifact to reproduce the results in the paper.
 
 ## Prerequisite
-- [libpfm4](https://sourceforge.net/projects/perfmon2/files/libpfm4/)
+- [libpfm4](https://sourceforge.net/projects/perfmon2/files/libpfm4/). On Debian-like systems, you can install it via `apt-get install libpfm4 libpfm4-dev`.
 
 ## Build
 Please adjust the definition of `JDK`, `DACAPO2006JAR`, and `DACAPOBACHJAR` in `Makefile` to point to the appropriate paths on your system.
