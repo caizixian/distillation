@@ -12,32 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import dacapo.Callback;
+import org.dacapo.harness.Callback;
+import org.dacapo.harness.CommandLineArgs;
 
-public class Dacapo2006Callback extends Callback {
+public class DacapoChopinCallback extends Callback {
   static {
     System.loadLibrary("dacapo_callback");
   }
 
-  public Dacapo2006Callback() {
-    super();
+  public DacapoChopinCallback(CommandLineArgs cla) {
+    super(cla);
   }
 
-  public void startWarmup(String benchmark) {
-    super.startWarmup(benchmark);
-  };
-
-  public void stopWarmup() {
-    super.stopWarmup();
-  }
   public void start(String benchmark) {
-    start_native();
+    if (!isWarmup()) {
+      start_native();
+    }
     super.start(benchmark);
   };
 
-  public void stop() {
-    super.stop();
-    stop_native();
+  public void stop(long duration) {
+    super.stop(duration);
+    if (!isWarmup()) {
+      stop_native();
+    }
   }
 
   public native void start_native();

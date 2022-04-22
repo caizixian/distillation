@@ -16,23 +16,7 @@
 #include <stdio.h>
 #include <dlfcn.h>
 
-JNIEXPORT void JNICALL Java_Dacapo2006Callback_start_1native
-  (JNIEnv *env, jobject o) {
-  void* handle = dlopen(NULL, RTLD_LAZY);
-  void (*harness_begin)() = dlsym(handle, "harness_begin");
-  if (harness_begin != NULL)
-      (*harness_begin)();
-}
-
-JNIEXPORT void JNICALL Java_Dacapo2006Callback_stop_1native
-  (JNIEnv *env, jobject o) {
-  void* handle = dlopen(NULL, RTLD_LAZY);
-  void (*harness_end)() = dlsym(handle, "harness_end");
-  if (harness_end != NULL)
-    (*harness_end)();
-}
-
-JNIEXPORT void JNICALL Java_DacapoBachCallback_start_1native
+JNIEXPORT void JNICALL Java_DacapoChopinCallback_start_1native
   (JNIEnv *env, jobject o) {
   void* handle = dlopen(NULL, RTLD_LAZY);
   void (*harness_begin)() = dlsym(handle, "harness_begin");
@@ -40,7 +24,7 @@ JNIEXPORT void JNICALL Java_DacapoBachCallback_start_1native
     (*harness_begin)();
 }
 
-JNIEXPORT void JNICALL Java_DacapoBachCallback_stop_1native
+JNIEXPORT void JNICALL Java_DacapoChopinCallback_stop_1native
   (JNIEnv *env, jobject o) {
   void* handle = dlopen(NULL, RTLD_LAZY);
   void (*harness_end)() = dlsym(handle, "harness_end");
