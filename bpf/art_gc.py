@@ -12,11 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import os
+import signal
+from threading import Event
 import bcc
 from bcc import BPF
 import enum
 import multiprocessing
+import sys
+from pathlib import Path
 
 class EventType(enum.Enum):
     NEWTASK = 0
@@ -130,32 +134,64 @@ int sched_switch(struct pt_regs *ctx, struct task_struct *prev){
 }
 """
 
-cpus = multiprocessing.cpu_count()
 
-art_so = "/apex/com.android.art/lib64/libart.so"
-gc_sym = "_ZN3art2gc9collector16GarbageCollector3RunENS0_7GcCauseEb"
+def main():
+    cpus = multiprocessing.cpu_count()
 
-b = BPF(text=bpf_text, cflags=["-DNUM_CPUS={}".format(cpus)])
-cycle_events = b["cycle_events"]
-cycle_events.open_perf_event(bcc.PerfType.HARDWARE, bcc.PerfHWConfig.CPU_CYCLES)
-b.attach_kprobe(event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$", fn_name="sched_switch")
-b.attach_uprobe(name = art_so, sym=gc_sym, fn_name="gc_run")
-b.attach_uretprobe(name = art_so, sym=gc_sym, fn_name="gc_run_ret")
+    art_so = "/apex/com.android.art/lib64/libart.so"
+    gc_sym = "_ZN3art2gc9collector16GarbageCollector3RunENS0_7GcCauseEb"
 
-while True:
-    try:
-        b.perf_buffer_poll()
-    except KeyboardInterrupt:
-        break
+    b = BPF(text=bpf_text, cflags=["-DNUM_CPUS={}".format(cpus)])
+    cycle_events = b["cycle_events"]
+    cycle_events.open_perf_event(bcc.PerfType.HARDWARE, bcc.PerfHWConfig.CPU_CYCLES)
+    b.attach_kprobe(event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$", fn_name="sched_switch")
+    b.attach_uprobe(name = art_so, sym=gc_sym, fn_name="gc_run")
+    b.attach_uretprobe(name = art_so, sym=gc_sym, fn_name="gc_run_ret")
 
-del cycle_events
+    def print_stats(fd = None):
+        if not fd:
+            fd = sys.stdout
 
-system_cycles_total_arr = b["system_cycles_total"]
-for cpu in range(cpus):
-    cycles = system_cycles_total_arr[cpu].value
-    print("System cycles CPU {}: {:,}".format(cpu, cycles))
+        nonlocal b
+        nonlocal cycle_events
+        del cycle_events
 
-gc_cycles_total_arr = b["gc_cycles_total"]
-for cpu in range(cpus):
-    cycles = gc_cycles_total_arr[cpu].value
-    print("GC cycles CPU {}: {:,}".format(cpu, cycles))
+        system_cycles_total_arr = b["system_cycles_total"]
+        for cpu in range(cpus):
+            cycles = system_cycles_total_arr[cpu].value
+            print("system_cycles_total_{},{}".format(cpu, cycles), file=fd)
+
+        gc_cycles_total_arr = b["gc_cycles_total"]
+        for cpu in range(cpus):
+            cycles = gc_cycles_total_arr[cpu].value
+            print("gc_cycles_total_{},{}".format(cpu, cycles), file=fd)
+
+
+    def finish_up(*_args):
+        if len(sys.argv) >= 2:
+            log_path = Path(sys.argv[1])
+            with log_path.open("w") as fd:
+                print_stats(fd)
+            symlink = log_path.resolve().parent / "latest.out"
+            if symlink.is_symlink():
+                symlink.unlink()
+            # Make symlink point to log_path
+            # Note that Path.link_to has completely opposite semantics
+            symlink.symlink_to(log_path)
+        else:
+            print_stats()
+        exit(0)
+        
+
+    signal.signal(signal.SIGTERM, finish_up)
+    signal.signal(signal.SIGINT, finish_up)
+
+    print(os.getpid())
+    evt = Event()
+
+    while True:
+        # Yield to not unnecessarily burn CPU cycles in the background
+        evt.wait(60)
+
+if __name__ == "__main__":
+    main()
