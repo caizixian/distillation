@@ -21,35 +21,56 @@ import enum
 import multiprocessing
 import sys
 from pathlib import Path
+import ctypes
+
 
 class EventType(enum.Enum):
-    NEWTASK = 0
-    RENAME = 1
-    EXEC = 2
+    EXIT = 1
+
+
+TASK_COMM_LEN = 16
+
+
+class Cycles(ctypes.Structure):
+    _fields_ = [
+        ("cycles", ctypes.c_uint64 * multiprocessing.cpu_count()),
+    ]
+
+
+class Data(ctypes.Structure):
+    _fields_ = [
+        ("pid", ctypes.c_uint32),
+        ("comm", ctypes.c_char * TASK_COMM_LEN),
+        ("tag", ctypes.c_int),
+        # ("total_cycles", Cycles),
+        # ("gc_cycles", Cycles)
+    ]
+
 
 bpf_text = """
 #include <linux/sched.h>
-
-enum event_type {
-    ENTER_GC,
-    EXIT_GC
-};
-
-struct data_t {
-    u32 pid;
-    u32 cpu;
-    char comm[TASK_COMM_LEN];
-    enum event_type tag;
-};
-BPF_PERF_OUTPUT(events);
 
 // We use kernel terminology throughout
 // Kernel process vs userspace thread
 // Kernel thread group vs userspace process
 
+enum event_type {
+    PROCESS_EXIT
+};
+
 struct cycles_t {
     u64 cycles[NUM_CPUS];
 };
+
+
+struct data_t {
+    u32 pid;
+    char comm[TASK_COMM_LEN];
+    enum event_type tag;
+    // struct cycles_t total_cycles;
+    // struct cycles_t gc_cycles;
+};
+BPF_PERF_OUTPUT(events);
 
 BPF_HASH(process_in_gc, u32, bool, 8192);
 BPF_PERF_ARRAY(cycle_events, NUM_CPUS);
@@ -163,33 +184,73 @@ TRACEPOINT_PROBE(sched, sched_process_exit) {
     //    field:char comm[TASK_COMM_LEN]; offset:8;       size:16;        signed:1;
     //    field:pid_t pid;        offset:24;      size:4; signed:1;
     //    field:int prio; offset:28;      size:4; signed:1;
+    struct data_t data = {};
+    u32 pid = args->pid;
+    data.pid = pid;
+    bpf_probe_read_kernel(&data.comm, sizeof(data.comm), args->comm);
+    // struct cycles_t* c;
+    // c = thread_group_cycles_total.lookup(&pid);
+    // if (c) {
+    //     #pragma unroll
+    //     for (int i = 0; i < NUM_CPUS; i++) {
+    //         data.total_cycles.cycles[i] = c->cycles[i];
+    //     }
+    //     thread_group_cycles_total.delete(&pid);
+    // }
+    // c = gc_cycles_total.lookup(&pid);
+    // if (c) {
+    //     #pragma unroll
+    //     for (int i = 0; i < NUM_CPUS; i++) {
+    //         data.gc_cycles.cycles[i] = c->cycles[i];
+    //     }
+    //     gc_cycles_total.delete(&pid);
+    // }
+    events.perf_submit(args, &data, sizeof(data));
     return 0;
 }
 
 """
 
-def render_tgid(pid: int) -> str:
-    p = Path("/proc") / str(pid) / "comm"
+
+def render_tgid(comm_pid, pid: int) -> str:
+    p = Path("/proc") / str(pid) / "cmdline"
     if p.exists():
-        return p.read_text().strip()
+        cmdline = p.read_text().strip()
+        if not cmdline:
+            p_comm = p / ".." / "comm"
+            if p_comm.exists():
+                return p_comm.read_text().strip()
+        return cmdline
+    elif pid in comm_pid:
+        return comm_pid[pid].decode("ascii")
     else:
         return str(pid)
 
 
 def main():
     cpus = multiprocessing.cpu_count()
+    data = []
 
     art_so = "/apex/com.android.art/lib64/libart.so"
     gc_sym = "_ZN3art2gc9collector16GarbageCollector3RunENS0_7GcCauseEb"
 
     b = BPF(text=bpf_text, cflags=["-DNUM_CPUS={}".format(cpus)])
-    cycle_events = b["cycle_events"]
-    cycle_events.open_perf_event(bcc.PerfType.HARDWARE, bcc.PerfHWConfig.CPU_CYCLES)
-    b.attach_kprobe(event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$", fn_name="sched_switch")
-    # b.attach_uprobe(name = art_so, sym=gc_sym, fn_name="gc_run")
-    # b.attach_uretprobe(name = art_so, sym=gc_sym, fn_name="gc_run_ret")
 
-    def print_stats(fd = None):
+    def store_event(_cpu, datum, _size):
+        nonlocal data
+        data.append(ctypes.cast(datum, ctypes.POINTER(Data)).contents)
+
+    b["events"].open_perf_buffer(store_event)
+
+    cycle_events = b["cycle_events"]
+    cycle_events.open_perf_event(
+        bcc.PerfType.HARDWARE, bcc.PerfHWConfig.CPU_CYCLES)
+    b.attach_kprobe(
+        event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$", fn_name="sched_switch")
+    b.attach_uprobe(name=art_so, sym=gc_sym, fn_name="gc_run")
+    b.attach_uretprobe(name=art_so, sym=gc_sym, fn_name="gc_run_ret")
+
+    def print_stats(fd=None):
         if not fd:
             fd = sys.stdout
 
@@ -197,18 +258,29 @@ def main():
         nonlocal cycle_events
         del cycle_events
 
+        nonlocal data
+        comm_pid = {datum.pid: datum.comm for datum in data}
+
         thread_group_cycles_total_hash = b["thread_group_cycles_total"]
         for tgid, cycles in sorted(thread_group_cycles_total_hash.items(), key=lambda x: x[0].value):
             for cpu in range(cpus):
                 cycle = cycles.cycles[cpu]
-                print("thread_group_cycles,{},{},{}".format(render_tgid(tgid.value), cpu, cycle), file=fd)
+                print("thread_group_cycles,{},{},{},{}".format(
+                    tgid.value, render_tgid(comm_pid, tgid.value), cpu, cycle), file=fd)
 
         gc_cycles_total_hash = b["gc_cycles_total"]
         for tgid, cycles in sorted(gc_cycles_total_hash.items(), key=lambda x: x[0].value):
             for cpu in range(cpus):
                 cycle = cycles.cycles[cpu]
-                print("gc_cycles,{},{},{}".format(render_tgid(tgid.value), cpu, cycle), file=fd)
+                print("gc_cycles,{},{},{},{}".format(tgid.value,
+                      render_tgid(comm_pid, tgid.value), cpu, cycle), file=fd)
 
+            # for cpu in range(cpus):
+            #     print("thread_group_cycles,{},{},{},{}".format(pid, comm.decode(
+            #         "ascii"), cpu, datum.total_cycles.cycles[cpu]), file=fd)
+            # for cpu in range(cpus):
+            #     print("gc_cycles,{},{},{},{}".format(pid, comm.decode(
+            #         "ascii"), cpu, datum.total_cycles.cycles[cpu]), file=fd)
 
     def finish_up(*_args):
         if len(sys.argv) >= 2:
@@ -224,17 +296,15 @@ def main():
         else:
             print_stats()
         exit(0)
-        
 
     signal.signal(signal.SIGTERM, finish_up)
     signal.signal(signal.SIGINT, finish_up)
 
     print(os.getpid())
-    evt = Event()
 
     while True:
-        # Yield to not unnecessarily burn CPU cycles in the background
-        evt.wait(60)
+        b.perf_buffer_poll()
+
 
 if __name__ == "__main__":
     main()
