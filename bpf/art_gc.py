@@ -30,23 +30,6 @@ class EventType(enum.Enum):
 
 TASK_COMM_LEN = 16
 
-
-class Cycles(ctypes.Structure):
-    _fields_ = [
-        ("cycles", ctypes.c_uint64 * multiprocessing.cpu_count()),
-    ]
-
-
-class Data(ctypes.Structure):
-    _fields_ = [
-        ("pid", ctypes.c_uint32),
-        ("comm", ctypes.c_char * TASK_COMM_LEN),
-        ("tag", ctypes.c_int),
-        ("total_cycles", Cycles),
-        ("gc_cycles", Cycles)
-    ]
-
-
 bpf_text = """
 #include <linux/sched.h>
 
@@ -67,8 +50,8 @@ struct data_t {
     u32 pid;
     char comm[TASK_COMM_LEN];
     enum event_type tag;
-    struct cycles_t total_cycles;
-    struct cycles_t gc_cycles;
+    u64 total_cycles;
+    u64 gc_cycles;
 };
 BPF_PERF_OUTPUT(events);
 
@@ -78,8 +61,8 @@ BPF_PERF_ARRAY(cycle_events, NUM_CPUS);
 BPF_ARRAY(system_cycles_start, u64, NUM_CPUS);
 BPF_ARRAY(gc_cycles_start, u64, NUM_CPUS);
 
-BPF_HASH(thread_group_cycles_total, u32, struct cycles_t, 8192);
-BPF_HASH(gc_cycles_total, u32, struct cycles_t, 8192);
+BPF_HASH(thread_group_cycles_total, u32, u64, 8192);
+BPF_HASH(gc_cycles_total, u32, u64, 8192);
 
 static bool get_in_gc(u32 pid) {
     bool *val;
@@ -102,12 +85,9 @@ static void add_gc_cycles(u32 tgid, u32 cpu, u64 cnt) {
     u64* cnt_prev = gc_cycles_start.lookup(&cpu);
     if (cnt_prev) {
         u64 diff = cnt - *cnt_prev;
-        struct cycles_t zero = {};
-        struct cycles_t* prev = gc_cycles_total.lookup_or_try_init(&tgid, &zero);
-        if (prev != NULL && cpu >= 0 && cpu < NUM_CPUS) {
-            prev->cycles[cpu] += diff;
-            gc_cycles_total.update(&tgid, prev);
-        }
+        u64 zero = 0;
+        u64* v = gc_cycles_total.lookup_or_try_init(&tgid, &zero);
+        gc_cycles_total.increment(tgid, diff);
     }
 }
 
@@ -115,12 +95,8 @@ static void add_thread_group_cycles(u32 tgid, u32 cpu, u64 cnt) {
     u64* cnt_prev = system_cycles_start.lookup(&cpu);
     if (cnt_prev) {
         u64 diff = cnt - *cnt_prev;
-        struct cycles_t zero = {};
-        struct cycles_t* prev = thread_group_cycles_total.lookup_or_try_init(&tgid, &zero);
-        if (prev != NULL && cpu >= 0 && cpu < NUM_CPUS) {
-            prev->cycles[cpu] += diff;
-            thread_group_cycles_total.update(&tgid, prev);
-        }
+        u64 zero = 0;
+        thread_group_cycles_total.increment(tgid, diff);
     }
 }
 
@@ -151,26 +127,19 @@ int gc_run_ret(struct pt_regs *ctx) {
     return 0;
 }
 
-static void submit_and_remove_thread_group(struct pt_regs *ctx, u32 tgid, char* comm) {
-    bpf_trace_printk("removing tgid %d %s", tgid, comm);
+static void submit_and_remove_thread_group(struct pt_regs *ctx, u32 tgid, u32 pid, char* comm) {
     struct data_t data = {};
     data.pid = tgid;
     bpf_probe_read_kernel(&data.comm, sizeof(data.comm), comm);
-    struct cycles_t* c;
+    u64* c;
     c = thread_group_cycles_total.lookup(&tgid);
     if (c) {
-        #pragma unroll
-        for (int i = 0; i < NUM_CPUS; i++) {
-            data.total_cycles.cycles[i] = c->cycles[i];
-        }
+        data.total_cycles = *c;
         thread_group_cycles_total.delete(&tgid);
     }
     c = gc_cycles_total.lookup(&tgid);
     if (c) {
-        #pragma unroll
-        for (int i = 0; i < NUM_CPUS; i++) {
-            data.gc_cycles.cycles[i] = c->cycles[i];
-        }
+        data.gc_cycles = *c;
         gc_cycles_total.delete(&tgid);
     }
     events.perf_submit(ctx, &data, sizeof(data));
@@ -198,30 +167,30 @@ int sched_switch(struct pt_regs *ctx, struct task_struct *prev){
             gc_cycles_start.update(&cpu, &cnt);
         }
     }
-    if (prev->exit_state != 0 && prev_pid == prev_tgid && prev_tgid != 0) {
-        submit_and_remove_thread_group(ctx, prev_tgid, prev->comm);
+    if (prev->exit_state != 0 && prev_pid == prev_tgid) {
+        submit_and_remove_thread_group(ctx, prev_tgid, prev_pid, prev->comm);
     }
     return 0;
 }
 """
 
 
-def render_tgid(comm_pid, pid: int) -> str:
+def render_tgid(pid: int) -> str:
     # NB Chrome is doing weird things to cmdline
     # https://unix.stackexchange.com/questions/432419/unexpected-non-null-encoding-of-proc-pid-cmdline
     p = Path("/proc") / str(pid) / "cmdline"
     if p.exists():
         cmdline = p.read_text().strip()
-        parts = cmdline.split()
-        if parts:
+        cmdline = cmdline.replace("\x00", " ")
+        parts = cmdline.split(" ")
+        if parts and parts[0]:
             return parts[0]
         else:
-            p_comm = p / ".." / "comm"
+            p_comm = p.parent / "comm"
             if p_comm.exists():
-                return p_comm.read_text().strip()
-    elif pid in comm_pid:
-        return comm_pid[pid].decode("ascii")
-
+                comm = p_comm.read_text().strip()
+                if comm:
+                    return comm
     return str(pid)
 
 
@@ -236,7 +205,7 @@ def main():
 
     def store_event(_cpu, datum, _size):
         nonlocal data
-        data.append(ctypes.cast(datum, ctypes.POINTER(Data)).contents)
+        data.append(b["events"].event(datum))
 
     b["events"].open_perf_buffer(store_event)
 
@@ -252,35 +221,31 @@ def main():
         if not fd:
             fd = sys.stdout
 
+        nonlocal data
+
+        for datum in data:
+            pid = datum.pid
+            comm = datum.comm.decode("ascii")
+            print("thread_group_cycles,{},{},{}".format(
+                pid, comm, datum.total_cycles), file=fd)
+            print("gc_cycles,{},{},{}".format(
+                pid, comm, datum.gc_cycles), file=fd)
+
+        print(file=fd)
+
         nonlocal b
         nonlocal cycle_events
         del cycle_events
 
-        nonlocal data
-        comm_pid = {datum.pid: datum.comm for datum in data}
+        thread_group_cycles_total = b["thread_group_cycles_total"]
+        for tgid, cycles in sorted(thread_group_cycles_total.items(), key=lambda x: x[0].value):
+            print("thread_group_cycles,{},{},{}".format(
+                tgid.value, render_tgid(tgid.value), cycles.value), file=fd)
 
-        thread_group_cycles_total_hash = b["thread_group_cycles_total"]
-        for tgid, cycles in sorted(thread_group_cycles_total_hash.items(), key=lambda x: x[0].value):
-            for cpu in range(cpus):
-                cycle = cycles.cycles[cpu]
-                print("thread_group_cycles,{},{},{},{}".format(
-                    tgid.value, render_tgid(comm_pid, tgid.value), cpu, cycle), file=fd)
-
-        gc_cycles_total_hash = b["gc_cycles_total"]
-        for tgid, cycles in sorted(gc_cycles_total_hash.items(), key=lambda x: x[0].value):
-            for cpu in range(cpus):
-                cycle = cycles.cycles[cpu]
-                print("gc_cycles,{},{},{},{}".format(tgid.value,
-                      render_tgid(comm_pid, tgid.value), cpu, cycle), file=fd)
-        print()
-        for datum in data:
-            pid = datum.pid
-            for cpu in range(cpus):
-                print("thread_group_cycles,{},{},{},{}".format(pid, render_tgid(
-                    comm_pid, pid), cpu, datum.total_cycles.cycles[cpu]), file=fd)
-            for cpu in range(cpus):
-                print("gc_cycles,{},{},{},{}".format(pid, render_tgid(
-                    comm_pid, pid), cpu, datum.gc_cycles.cycles[cpu]), file=fd)
+        gc_cycles_total = b["gc_cycles_total"]
+        for tgid, cycles in sorted(gc_cycles_total.items(), key=lambda x: x[0].value):
+            print("gc_cycles,{},{},{}".format(
+                tgid.value, render_tgid(tgid.value), cycles.value), file=fd)
 
     def finish_up(*_args):
         if len(sys.argv) >= 2:
