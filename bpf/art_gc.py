@@ -42,8 +42,8 @@ class Data(ctypes.Structure):
         ("pid", ctypes.c_uint32),
         ("comm", ctypes.c_char * TASK_COMM_LEN),
         ("tag", ctypes.c_int),
-        # ("total_cycles", Cycles),
-        # ("gc_cycles", Cycles)
+        ("total_cycles", Cycles),
+        ("gc_cycles", Cycles)
     ]
 
 
@@ -67,8 +67,8 @@ struct data_t {
     u32 pid;
     char comm[TASK_COMM_LEN];
     enum event_type tag;
-    // struct cycles_t total_cycles;
-    // struct cycles_t gc_cycles;
+    struct cycles_t total_cycles;
+    struct cycles_t gc_cycles;
 };
 BPF_PERF_OUTPUT(events);
 
@@ -151,6 +151,32 @@ int gc_run_ret(struct pt_regs *ctx) {
     return 0;
 }
 
+static void submit_and_remove_thread_group(struct pt_regs *ctx, u32 tgid, char* comm) {
+    bpf_trace_printk("removing tgid %d %s", tgid, comm);
+    struct data_t data = {};
+    data.pid = tgid;
+    bpf_probe_read_kernel(&data.comm, sizeof(data.comm), comm);
+    struct cycles_t* c;
+    c = thread_group_cycles_total.lookup(&tgid);
+    if (c) {
+        #pragma unroll
+        for (int i = 0; i < NUM_CPUS; i++) {
+            data.total_cycles.cycles[i] = c->cycles[i];
+        }
+        thread_group_cycles_total.delete(&tgid);
+    }
+    c = gc_cycles_total.lookup(&tgid);
+    if (c) {
+        #pragma unroll
+        for (int i = 0; i < NUM_CPUS; i++) {
+            data.gc_cycles.cycles[i] = c->cycles[i];
+        }
+        gc_cycles_total.delete(&tgid);
+    }
+    events.perf_submit(ctx, &data, sizeof(data));
+}
+
+
 int sched_switch(struct pt_regs *ctx, struct task_struct *prev){
     u32 pid = bpf_get_current_pid_tgid();
     u32 cpu = bpf_get_smp_processor_id();
@@ -172,59 +198,31 @@ int sched_switch(struct pt_regs *ctx, struct task_struct *prev){
             gc_cycles_start.update(&cpu, &cnt);
         }
     }
+    if (prev->exit_state != 0 && prev_pid == prev_tgid && prev_tgid != 0) {
+        submit_and_remove_thread_group(ctx, prev_tgid, prev->comm);
+    }
     return 0;
 }
-
-TRACEPOINT_PROBE(sched, sched_process_exit) {
-    //    field:unsigned short common_type;       offset:0;       size:2; signed:0;
-    //    field:unsigned char common_flags;       offset:2;       size:1; signed:0;
-    //    field:unsigned char common_preempt_count;       offset:3;       size:1; signed:0;
-    //    field:int common_pid;   offset:4;       size:4; signed:1;
-
-    //    field:char comm[TASK_COMM_LEN]; offset:8;       size:16;        signed:1;
-    //    field:pid_t pid;        offset:24;      size:4; signed:1;
-    //    field:int prio; offset:28;      size:4; signed:1;
-    struct data_t data = {};
-    u32 pid = args->pid;
-    data.pid = pid;
-    bpf_probe_read_kernel(&data.comm, sizeof(data.comm), args->comm);
-    // struct cycles_t* c;
-    // c = thread_group_cycles_total.lookup(&pid);
-    // if (c) {
-    //     #pragma unroll
-    //     for (int i = 0; i < NUM_CPUS; i++) {
-    //         data.total_cycles.cycles[i] = c->cycles[i];
-    //     }
-    //     thread_group_cycles_total.delete(&pid);
-    // }
-    // c = gc_cycles_total.lookup(&pid);
-    // if (c) {
-    //     #pragma unroll
-    //     for (int i = 0; i < NUM_CPUS; i++) {
-    //         data.gc_cycles.cycles[i] = c->cycles[i];
-    //     }
-    //     gc_cycles_total.delete(&pid);
-    // }
-    events.perf_submit(args, &data, sizeof(data));
-    return 0;
-}
-
 """
 
 
 def render_tgid(comm_pid, pid: int) -> str:
+    # NB Chrome is doing weird things to cmdline
+    # https://unix.stackexchange.com/questions/432419/unexpected-non-null-encoding-of-proc-pid-cmdline
     p = Path("/proc") / str(pid) / "cmdline"
     if p.exists():
         cmdline = p.read_text().strip()
-        if not cmdline:
+        parts = cmdline.split()
+        if parts:
+            return parts[0]
+        else:
             p_comm = p / ".." / "comm"
             if p_comm.exists():
                 return p_comm.read_text().strip()
-        return cmdline
     elif pid in comm_pid:
         return comm_pid[pid].decode("ascii")
-    else:
-        return str(pid)
+
+    return str(pid)
 
 
 def main():
@@ -274,13 +272,15 @@ def main():
                 cycle = cycles.cycles[cpu]
                 print("gc_cycles,{},{},{},{}".format(tgid.value,
                       render_tgid(comm_pid, tgid.value), cpu, cycle), file=fd)
-
-            # for cpu in range(cpus):
-            #     print("thread_group_cycles,{},{},{},{}".format(pid, comm.decode(
-            #         "ascii"), cpu, datum.total_cycles.cycles[cpu]), file=fd)
-            # for cpu in range(cpus):
-            #     print("gc_cycles,{},{},{},{}".format(pid, comm.decode(
-            #         "ascii"), cpu, datum.total_cycles.cycles[cpu]), file=fd)
+        print()
+        for datum in data:
+            pid = datum.pid
+            for cpu in range(cpus):
+                print("thread_group_cycles,{},{},{},{}".format(pid, render_tgid(
+                    comm_pid, pid), cpu, datum.total_cycles.cycles[cpu]), file=fd)
+            for cpu in range(cpus):
+                print("gc_cycles,{},{},{},{}".format(pid, render_tgid(
+                    comm_pid, pid), cpu, datum.gc_cycles.cycles[cpu]), file=fd)
 
     def finish_up(*_args):
         if len(sys.argv) >= 2:
