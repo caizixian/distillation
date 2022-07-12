@@ -85,8 +85,6 @@ static void add_gc_cycles(u32 tgid, u32 cpu, u64 cnt) {
     u64* cnt_prev = gc_cycles_start.lookup(&cpu);
     if (cnt_prev) {
         u64 diff = cnt - *cnt_prev;
-        u64 zero = 0;
-        u64* v = gc_cycles_total.lookup_or_try_init(&tgid, &zero);
         gc_cycles_total.increment(tgid, diff);
     }
 }
@@ -95,35 +93,29 @@ static void add_thread_group_cycles(u32 tgid, u32 cpu, u64 cnt) {
     u64* cnt_prev = system_cycles_start.lookup(&cpu);
     if (cnt_prev) {
         u64 diff = cnt - *cnt_prev;
-        u64 zero = 0;
         thread_group_cycles_total.increment(tgid, diff);
     }
 }
 
-static void process_enter_gc(u32 pid) {
+int gc_run(struct pt_regs *ctx) {
     u32 cpu = bpf_get_smp_processor_id();
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid;
+    u32 tgid = pid_tgid >> 32;
     set_in_gc(pid, true);
     u64 cnt = cycle_events.perf_read(cpu);
     gc_cycles_start.update(&cpu, &cnt);
-}
-
-static void process_exit_gc(u32 pid) {
-    u32 cpu = bpf_get_smp_processor_id();
-    set_in_gc(pid, false);
-    u64 cnt = cycle_events.perf_read(cpu);
-    u32 tgid = bpf_get_current_pid_tgid() >> 32;
-    add_gc_cycles(tgid, cpu, cnt);
-}
-
-int gc_run(struct pt_regs *ctx) {
-    u32 cpu = bpf_get_smp_processor_id();
-    process_enter_gc(cpu);
     return 0;
 }
 
 int gc_run_ret(struct pt_regs *ctx) {
     u32 cpu = bpf_get_smp_processor_id();
-    process_exit_gc(cpu);
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid;
+    u32 tgid = pid_tgid >> 32;
+    set_in_gc(pid, false);
+    u64 cnt = cycle_events.perf_read(cpu);
+    add_gc_cycles(tgid, cpu, cnt);
     return 0;
 }
 
