@@ -122,7 +122,7 @@ int gc_run_ret(struct pt_regs *ctx) {
 static void submit_and_remove_thread_group(struct pt_regs *ctx, u32 tgid, u32 pid, char* comm) {
     struct data_t data = {};
     data.pid = tgid;
-    bpf_probe_read_kernel(&data.comm, sizeof(data.comm), comm);
+    bpf_probe_read_kernel_str(&data.comm, sizeof(data.comm), comm);
     u64* c;
     c = thread_group_cycles_total.lookup(&tgid);
     if (c) {
