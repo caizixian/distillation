@@ -31,6 +31,7 @@ class EventType(enum.Enum):
 TASK_COMM_LEN = 16
 
 bpf_text = """
+#include <linux/sched/signal.h>
 #include <linux/sched.h>
 
 // We use kernel terminology throughout
@@ -119,27 +120,14 @@ int gc_run_ret(struct pt_regs *ctx) {
     return 0;
 }
 
-static void submit_and_remove_thread_group(struct pt_regs *ctx, u32 tgid, u32 pid, char* comm) {
-    struct data_t data = {};
-    data.pid = tgid;
-    bpf_probe_read_kernel_str(&data.comm, sizeof(data.comm), comm);
-    u64* c;
-    c = thread_group_cycles_total.lookup(&tgid);
-    if (c) {
-        data.total_cycles = *c;
-        thread_group_cycles_total.delete(&tgid);
-    }
-    c = gc_cycles_total.lookup(&tgid);
-    if (c) {
-        data.gc_cycles = *c;
-        gc_cycles_total.delete(&tgid);
-    }
-    events.perf_submit(ctx, &data, sizeof(data));
-}
-
-
-int sched_switch(struct pt_regs *ctx, struct task_struct *prev){
-    u32 pid = bpf_get_current_pid_tgid();
+RAW_TRACEPOINT_PROBE(sched_switch) {
+    //TP_PROTO(bool preempt,
+    //         struct task_struct *prev,
+    //         struct task_struct *next,
+    //         unsigned int prev_state),
+    struct task_struct *prev = (struct task_struct *)ctx->args[1];
+    struct task_struct *next = (struct task_struct *)ctx->args[2];
+    u32 pid = next->pid;
     u32 cpu = bpf_get_smp_processor_id();
     u64 cnt = cycle_events.perf_read(cpu);
     u32 prev_pid = prev->pid;
@@ -159,9 +147,36 @@ int sched_switch(struct pt_regs *ctx, struct task_struct *prev){
             gc_cycles_start.update(&cpu, &cnt);
         }
     }
-    if (prev->exit_state != 0 && prev_pid == prev_tgid) {
-        submit_and_remove_thread_group(ctx, prev_tgid, prev_pid, prev->comm);
+    return 0;
+}
+
+RAW_TRACEPOINT_PROBE(sched_process_free) {
+    // TP_PROTO(struct task_struct *p)
+    struct task_struct *p = (struct task_struct *)ctx->args[0];
+    bool is_leader = (p->group_leader) == p;
+    if (!is_leader) {
+        return 0;
     }
+    struct data_t data = {};
+    u32 tgid = p->tgid;
+    data.pid = tgid;
+    bpf_probe_read_kernel_str(&data.comm, sizeof(data.comm), p->comm);
+    u64* c;
+    c = thread_group_cycles_total.lookup(&tgid);
+    if (c) {
+        data.total_cycles = *c;
+        thread_group_cycles_total.delete(&tgid);
+    } else {
+        data.total_cycles = -1;
+    }
+    c = gc_cycles_total.lookup(&tgid);
+    if (c) {
+        data.gc_cycles = *c;
+        gc_cycles_total.delete(&tgid);
+    } else {
+        data.gc_cycles = 0;
+    }
+    events.perf_submit(ctx, &data, sizeof(data));
     return 0;
 }
 """
@@ -204,8 +219,6 @@ def main():
     cycle_events = b["cycle_events"]
     cycle_events.open_perf_event(
         bcc.PerfType.HARDWARE, bcc.PerfHWConfig.CPU_CYCLES)
-    b.attach_kprobe(
-        event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$", fn_name="sched_switch")
     b.attach_uprobe(name=art_so, sym=gc_sym, fn_name="gc_run")
     b.attach_uretprobe(name=art_so, sym=gc_sym, fn_name="gc_run_ret")
 
