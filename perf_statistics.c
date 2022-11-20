@@ -89,8 +89,9 @@ static bool check_single_thread() {
 Counter perf_counter_create(char* perf_event) {
     perf_event_attr_t pe;
     int ret;
-    char* perf_event_save = malloc(strlen(perf_event) + 1);
-    strncpy(perf_event_save, perf_event, strlen(perf_event) + 1);
+    int len = strlen(perf_event);
+    char* perf_event_save = calloc(len + 1, 1);
+    memcpy(perf_event_save, perf_event, len);
     memset(&pe, 0, sizeof(perf_event_attr_t));
     // Include both kernel and user space
     ret = pfm_get_perf_event_encoding(perf_event, PFM_PLM0|PFM_PLM3|PFM_PLMH, &pe, NULL, NULL);
@@ -156,8 +157,8 @@ static void setup_counters() {
         return;
     }
     int len = strlen(perf_events_env);
-    char* perf_events = malloc(len + 1);
-    strncpy(perf_events, perf_events_env, len+1);
+    char* perf_events = calloc(len + 1, 1);
+    memcpy(perf_events, perf_events_env, len);
     char* perf_event = strtok(perf_events, ",");
     while (perf_event != NULL) {
         counters[num_counter] = perf_counter_create(perf_event);
