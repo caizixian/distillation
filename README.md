@@ -54,6 +54,20 @@ PERF_EVENTS=<events> LD_PRELOAD=`pwd`/libperf_statistics.so java -Djava.library.
 Please refer to the `libpfm4` documentation for more details.
 For example, to measure the cycle count and the instruction count, you can use `PERF_COUNT_HW_CPU_CYCLES,PERF_COUNT_HW_INSTRUCTIONS`.
 
+## Reproducing results
+Install [running-ng](https://pypi.org/project/running-ng/) using pip.
+The configuration files in this repo is tested with running-ng v0.3.5.
+Open `runbms.yml` and `runbms_epsilon.yml`, and replace all paths (OpenJDK 17, a clone of this repo, DaCapo benchmarks) mentioned in the file to the appropriate paths on your machine.
+Please refer to our paper for the experimental setup (hardware and software environments).
+
+```bash
+mkdir results
+running runbms ./results runbms.yml 8 --skip-oom 1 --skip-timeout 1
+running runbms ./results runbms_epsilon.yml --skip-oom 1 --skip-timeout 1
+```
+
+Please refer to the [documentation](https://anupli.github.io/running-ng/) of running-ng for more information.
+
 ## License
 Copyright 2021 Zixian Cai
 

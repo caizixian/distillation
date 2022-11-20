@@ -1,0 +1,103 @@
+benchmarks:
+  dacapochopin-29a657f:
+  - avrora
+  - batik
+  - biojava
+  - eclipse
+  - fop
+  - graphchi
+  - h2
+  - jme
+  - jython
+  - luindex
+  - lusearch
+  - pmd
+  - sunflow
+  - tradebeans
+  - tradesoap
+  - tomcat
+  - xalan
+  - zxing
+configs:
+- temurin-17|openjdk_common|hotspot_gc-Epsilon|heap120g
+heap_range: 6
+invocations: 20
+minheap_multiplier: 1.0
+modifiers:
+  c2:
+    excludes:
+      dacapochopin-29a657f:
+      - tradebeans
+      - tradesoap
+      dacapochopin-69a704e:
+      - tradebeans
+      - tradesoap
+    type: JVMArg
+    val: -XX:-TieredCompilation -Xcomp
+  heap120g:
+    type: JVMArg
+    val: -Xms120G -Xmx120G
+  hotspot_gc:
+    type: JVMArg
+    val: -XX:+UnlockExperimentalVMOptions -XX:+Use{0}GC
+  jvmti:
+    type: JVMArg
+    val: -agentpath:/home/zixianc/distillation/libperf_statistics.so
+  jvmti_env:
+    type: EnvVar
+    val: /home/zixianc/distillation/libperf_statistics.so
+    var: LD_PRELOAD
+  openjdk_common:
+    type: ModifierSet
+    val: s|c2|probes|probes_cp|jvmti|jvmti_env|perf
+  perf:
+    type: EnvVar
+    val: PERF_COUNT_HW_CPU_CYCLES,PERF_COUNT_HW_INSTRUCTIONS,PERF_COUNT_HW_CACHE_LL:MISS,PERF_COUNT_HW_CACHE_L1D:MISS,PERF_COUNT_HW_CACHE_DTLB:MISS
+    var: PERF_EVENTS
+  probes:
+    type: JVMArg
+    val: -Djava.library.path=/home/zixianc/distillation
+  probes_cp:
+    type: JVMClasspath
+    val: /home/zixianc/distillation
+  s:
+    type: JVMArg
+    val: -server
+remote_host: null
+runtimes:
+  temurin-17:
+    home: /usr/lib/jvm/temurin-17-jdk-amd64
+    release: 17
+    type: OpenJDK
+spread_factor: 1
+suites:
+  dacapochopin-29a657f:
+    callback: DacapoChopinCallback
+    minheap: temurin-17-G1
+    minheap_values:
+      temurin-17-G1:
+        avrora: 7
+        batik: 189
+        biojava: 95
+        eclipse: 411
+        fop: 15
+        graphchi: 255
+        h2: 773
+        jme: 29
+        jython: 25
+        luindex: 42
+        lusearch: 21
+        lusearch_huge: 122
+        lusearch_large: 142
+        pmd: 156
+        sunflow: 29
+        tomcat: 21
+        tradebeans: 131
+        tradesoap: 103
+        xalan: 8
+        zxing: 97
+    path: /usr/share/benchmarks/dacapo/dacapo-evaluation-git-29a657f.jar
+    release: evaluation
+    timeout: 600
+    timing_iteration: 5
+    type: DaCapo
